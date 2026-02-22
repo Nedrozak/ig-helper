@@ -183,6 +183,24 @@ export function saveFiles(downloadLink, username, sourceType, timestamp, filetyp
 }
 
 /**
+ * fetchArrayBuffer
+ * @description Download URL as ArrayBuffer.
+ *
+ * @param {string} url
+ * @return {Promise<ArrayBuffer>}
+ */
+async function fetchArrayBuffer(url) {
+    updateLoadingBar(true);
+    try {
+        const res = await fetch(url);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return await res.arrayBuffer();
+    } finally {
+        updateLoadingBar(false);
+    }
+}
+
+/**
  * parseDashManifest
  * @description Parse Media API video_dash_manifest (MPD XML).
  *              Returns best video/audio representation URLs.
@@ -231,6 +249,90 @@ function parseDashManifest(mpdXml) {
     }
 }
 
+/**
+ * muxDashVideoAudioToMp4
+ * @description Mux DASH video+audio into one MP4 using Mediabunny (demux + mux).
+ *
+ * @param {ArrayBuffer} videoBuf
+ * @param {ArrayBuffer} audioBuf
+ * @return {Promise<ArrayBuffer>}
+ */
+async function muxDashVideoAudioToMp4(videoBuf, audioBuf) {
+    const MB = Mediabunny;
+
+    const videoInput = new MB.Input({
+        formats: [MB.MP4],
+        source: new MB.BufferSource(videoBuf),
+    });
+    const audioInput = new MB.Input({
+        formats: [MB.MP4],
+        source: new MB.BufferSource(audioBuf),
+    });
+
+    const vTrack = await videoInput.getPrimaryVideoTrack();
+    if (!vTrack || !vTrack.codec) throw new Error('No video track found');
+
+    const aTrack = await audioInput.getPrimaryAudioTrack();
+    if (!aTrack || !aTrack.codec) throw new Error('No audio track found');
+
+    const vSink = new MB.EncodedPacketSink(vTrack);
+    const aSink = new MB.EncodedPacketSink(aTrack);
+
+    const output = new MB.Output({
+        format: new MB.Mp4OutputFormat({ fastStart: 'in-memory' }),
+        target: new MB.BufferTarget(),
+    });
+
+    const vSource = new MB.EncodedVideoPacketSource(vTrack.codec);
+    const aSource = new MB.EncodedAudioPacketSource(aTrack.codec);
+
+    output.addVideoTrack(vSource, { rotation: vTrack.rotation || 0 });
+    output.addAudioTrack(aSource);
+
+    await output.start();
+
+    const vDecoderConfig = await vTrack.getDecoderConfig();
+    const aDecoderConfig = await aTrack.getDecoderConfig();
+
+    const vMeta = vDecoderConfig ? { decoderConfig: vDecoderConfig } : undefined;
+    const aMeta = aDecoderConfig ? { decoderConfig: aDecoderConfig } : undefined;
+
+    const vIter = vSink.packets();
+    const aIter = aSink.packets();
+
+    let vNext = await vIter.next();
+    let aNext = await aIter.next();
+    let vSentMeta = false;
+    let aSentMeta = false;
+
+    while (!vNext.done || !aNext.done) {
+        const takeVideo = (() => {
+            if (vNext.done) return false;
+            if (aNext.done) return true;
+            return vNext.value.timestamp <= aNext.value.timestamp;
+        })();
+
+        if (takeVideo) {
+            await vSource.add(vNext.value, vSentMeta ? undefined : vMeta);
+            vSentMeta = true;
+            vNext = await vIter.next();
+        } else {
+            await aSource.add(aNext.value, aSentMeta ? undefined : aMeta);
+            aSentMeta = true;
+            aNext = await aIter.next();
+        }
+    }
+
+    await output.finalize();
+
+    const outBuf = output.target.buffer;
+    if (outBuf instanceof ArrayBuffer) return outBuf;
+    if (outBuf && outBuf.buffer) {
+        return outBuf.buffer.slice(outBuf.byteOffset, outBuf.byteOffset + outBuf.byteLength);
+    }
+    throw new Error('Unexpected output buffer type');
+}
+
 async function downloadDashStreams(videoUrl, audioUrl, username, sourceType, timestamp, shortcode) {
     logger('[DASH]', 'downloadDashStreams()', {
         videoUrl: videoUrl,
@@ -239,16 +341,32 @@ async function downloadDashStreams(videoUrl, audioUrl, username, sourceType, tim
         shortcode
     });
 
-    await saveFiles(videoUrl, username, sourceType, timestamp, 'mp4', shortcode);
-
-    if (audioUrl) {
-        await saveFiles(audioUrl, username, sourceType, timestamp, 'm4a', shortcode);
-        logger('[DASH]', 'Downloaded DASH video+audio separately. Merge locally with: ffmpeg -i video.mp4 -i audio.m4a -c copy output.mp4');
-    } else {
+    if (!audioUrl) {
         logger('[DASH]', 'Downloaded DASH video only (no audio rep / has_audio=false).');
+        await saveFiles(videoUrl, username, sourceType, timestamp, 'mp4', shortcode);
+        return true;
     }
 
-    return true;
+    try {
+        logger('[DASH]', 'Fetching DASH streams for mux...');
+        const [vBuf, aBuf] = await Promise.all([
+            fetchArrayBuffer(videoUrl),
+            fetchArrayBuffer(audioUrl)
+        ]);
+
+        logger('[DASH]', 'Muxing DASH video+audio into one MP4 (mp4box main thread)...');
+        const mergedBuf = await muxDashVideoAudioToMp4(vBuf, aBuf);
+        const mergedBlob = new Blob([mergedBuf], { type: 'video/mp4' });
+
+        createSaveFileElement(videoUrl, mergedBlob, username, sourceType, timestamp, 'mp4', shortcode);
+        logger('[DASH]', 'Merged MP4 download triggered.');
+        return true;
+    } catch (e) {
+        logger('[DASH]', 'Mux failed -> fallback to separate downloads', e?.message || e);
+        await saveFiles(videoUrl, username, sourceType, timestamp, 'mp4', shortcode);
+        await saveFiles(audioUrl, username, sourceType, timestamp, 'm4a', shortcode);
+        return true;
+    }
 }
 
 /**
