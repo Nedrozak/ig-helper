@@ -1,7 +1,7 @@
 FS_IMPORT('./metadata.js');
 
 // eslint-disable-next-line no-unused-vars
-(function ($) {
+(function ($, Mediabunny) {
     'use strict';
 
     /* initial */
@@ -16,9 +16,6 @@ FS_IMPORT('./metadata.js');
     FS_IMPORT('./functions/reel.js');
     FS_IMPORT('./functions/story.js');
 
-    /* vendor */
-    FS_IMPORT('./vendor/mediabunny.min.cjs');
-
     /* untils */
     FS_IMPORT('./utils/api.js');
     FS_IMPORT('./utils/general.js');
@@ -27,4 +24,4 @@ FS_IMPORT('./metadata.js');
 
     /* register all events */
     FS_IMPORT('./events.js');
-})(jQuery);
+})(jQuery, Mediabunny);

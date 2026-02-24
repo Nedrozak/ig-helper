@@ -245,6 +245,7 @@ function parseDashManifest(mpdXml) {
 
         return { video: bestVideo, audio: bestAudio };
     } catch (e) {
+        logger('[DASH]', 'parseDashManifest() error:', e);
         return { video: null, audio: null };
     }
 }
@@ -682,19 +683,19 @@ export async function triggerLinkElement(element, isPreview) {
 
         let mediaId = $(element).attr('media-id');
 
-        if (USER_SETTING.DOWNLOAD_STREAM_VIDEO && state.GL_videoDashCache[mediaId] && !isPreview) {
+        if (USER_SETTING.PREFER_DASH_MANIFEST && state.GL_mediaDataCache[mediaId] && !isPreview) {
             logger('[Video Dash Stream]', 'Processing video with DASH manifest, mediaId:', mediaId);
-            let dashManifest = state.GL_videoDashCache[mediaId];
-            let { video, audio } = getXmlMediaDashManifest(dashManifest);
-
-
-            let videoURL = replaceSameOriginHost(video.url);
-            let audioURL = replaceSameOriginHost(audio.url);
-
-            let downloadName = getSaveFileName(videoURL, username, $(element).attr('data-name'), timestamp, $(element).attr('data-type'), $(element).attr('data-path'));
-
-            GM_openInTab(`https://www.yuriko.cc/tools/ffmpeg?videoURL=${encodeURIComponent(videoURL)}&audioURL=${encodeURIComponent(audioURL)}&filename=${encodeURIComponent(downloadName)}`, { active: true });
-            return;
+            const handled = await tryHandleDashFromMediaItem({
+                mediaItem: state.GL_mediaDataCache[mediaId],
+                username,
+                sourceType: $(element).data('name'),
+                timestamp,
+                shortcode: $(element).data('path'),
+                isPreview: false,
+            });
+            if (handled) {
+                return;
+            }
         }
 
         if (USER_SETTING.CAPTURE_IMAGE_VIA_MEDIA_CACHE) {
