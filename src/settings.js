@@ -15,6 +15,7 @@ export const USER_SETTING = {
     'FALLBACK_TO_BLOB_FETCH_IF_MEDIA_API_THROTTLED': false,
     'FORCE_FETCH_ALL_RESOURCES': false,
     'FORCE_RESOURCE_VIA_MEDIA': false,
+    'DOWNLOAD_STREAM_VIDEO': false,
     'HTML5_VIDEO_CONTROL': false,
     'MODIFY_RESOURCE_EXIF': false,
     'MODIFY_VIDEO_VOLUME': false,
@@ -85,6 +86,7 @@ export var state = {
     GL_observer: new MutationObserver(function () {
         onReadyMyDW();
     }),
-    GL_imageCache: GM_getValue(IMAGE_CACHE_KEY, {})
+    GL_imageCache: GM_getValue(IMAGE_CACHE_KEY, {}),
+    GL_videoDashCache: {},
 };
 /*******************************/

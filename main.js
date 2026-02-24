@@ -5,7 +5,7 @@
 // @name:ja            IG助手
 // @name:ko            IG조수
 // @namespace          https://github.snkms.com/
-// @version            3.11.1
+// @version            3.12.4
 // @description        Downloading is possible for both photos and videos from posts, as well as for stories, reels or profile picture.
 // @description:zh-TW  一鍵下載對方 Instagram 貼文中的相片、影片甚至是他們的限時動態、連續短片及大頭貼圖片！
 // @description:zh-CN  一键下载对方 Instagram 帖子中的相片、视频甚至是他们的快拍、Reels及头像图片！
@@ -59,6 +59,7 @@
         'FALLBACK_TO_BLOB_FETCH_IF_MEDIA_API_THROTTLED': false,
         'FORCE_FETCH_ALL_RESOURCES': false,
         'FORCE_RESOURCE_VIA_MEDIA': false,
+        'DOWNLOAD_STREAM_VIDEO': false,
         'HTML5_VIDEO_CONTROL': false,
         'MODIFY_RESOURCE_EXIF': false,
         'MODIFY_VIDEO_VOLUME': false,
@@ -127,7 +128,8 @@
         GL_observer: new MutationObserver(function () {
             onReadyMyDW();
         }),
-        GL_imageCache: GM_getValue(IMAGE_CACHE_KEY, {})
+        GL_imageCache: GM_getValue(IMAGE_CACHE_KEY, {}),
+        GL_videoDashCache: {},
     };
     /*******************************/
 
@@ -1119,11 +1121,7 @@
                                     else {
                                         let href = $linkElement?.attr('data-href');
                                         if (href) {
-                                            // replace https://instagram.ftpe8-2.fna.fbcdn.net/ to https://scontent.cdninstagram.com/ becase of same origin policy (some video)
-                                            var urlObj = new URL(href);
-                                            urlObj.host = 'scontent.cdninstagram.com';
-
-                                            openNewTab(urlObj.href);
+                                            openNewTab(replaceSameOriginHost(href));
                                         }
                                         else {
                                             alert('Cannot find open tab URL.');
@@ -1361,6 +1359,10 @@
                 if (resource.__typename == "GraphVideo" && resource.video_url) {
                     $(selector).append(`<a media-id="${resource.id}" datetime="${resource.taken_at_timestamp}" data-blob="true" data-needed="direct" data-path="${resource.shortcode}" data-name="video" data-type="mp4" data-username="${resource.owner.username}" data-globalIndex="${idx}" href="javascript:;" data-href="${resource.video_url}"><img width="100" src="${resource.display_resources[1].src}" /><br/>- <span data-ih-locale="VID">${_i18n("VID")}</span> ${idx} -</a>`);
                     idx++;
+
+                    if (resource.video_dash_manifest) {
+                        state.GL_videoDashCache[resource.id] = resource.video_dash_manifest;
+                    }
                 }
                 // GraphImage
                 if (resource.__typename == "GraphImage") {
@@ -1372,6 +1374,9 @@
                     for (let e of resource.edge_sidecar_to_children.edges) {
                         if (e.node.__typename == "GraphVideo") {
                             $(selector).append(`<a media-id="${e.node.id}" datetime="${resource.taken_at_timestamp}" data-blob="true" data-needed="direct" data-path="${resource.shortcode}" data-name="video" data-type="mp4" data-username="${resource.owner.username}" data-globalIndex="${idx}" href="javascript:;" data-href="${e.node.video_url}"><img width="100" src="${e.node.display_resources[1].src}" /><br/>- <span data-ih-locale-title="VID">${_i18n("VID")}</span> ${idx} -</a>`);
+                            if (e.node.video_dash_manifest) {
+                                state.GL_videoDashCache[e.node.id] = e.node.video_dash_manifest;
+                            }
                         }
 
                         if (e.node.__typename == "GraphImage") {
@@ -1410,6 +1415,9 @@
                         // Video
                         else {
                             $(selector).append(`<a media-id="${mda.pk}" datetime="${mda.taken_at}" data-blob="true" data-needed="direct" data-path="${resource.code}" data-name="video" data-type="mp4" data-username="${resource.owner.username}" data-globalIndex="${idx}" href="javascript:;" data-href="${mda.video_versions[0].url}"><img width="100" src="${mda.image_versions2.candidates[0].url}" /><br/>- <span data-ih-locale="VID">${_i18n("VID")}</span> ${idx} -</a>`);
+                            if (mda.video_dash_manifest) {
+                                state.GL_videoDashCache[mda.pk] = mda.video_dash_manifest;
+                            }
                         }
                     });
                 }
@@ -1437,6 +1445,9 @@
                     }
                     // Video
                     else {
+                        if (resource.video_dash_manifest) {
+                            state.GL_videoDashCache[resource.pk] = resource.video_dash_manifest;
+                        }
                         $(selector).append(`<a media-id="${resource.pk}" datetime="${resource.taken_at}" data-blob="true" data-needed="direct" data-path="${resource.code}" data-name="video" data-type="mp4" data-username="${resource.owner.username}" data-globalIndex="${idx}" href="javascript:;" data-href="${resource.video_versions[0].url}"><img width="100" src="${resource.image_versions2.candidates[0].url}" /><br/>- <span data-ih-locale="VID">${_i18n("VID")}</span> ${idx} -</a>`);
                     }
                 }
@@ -3188,19 +3199,18 @@
     }
 
     /**
-     * createSaveFileElement
-     * @description Download the specified media with link element.
+     * getSaveFileName
+     * @description Get the file name for downloaded media according to the user settings and resource information.
      *
      * @param  {String}  downloadLink
-     * @param  {Object}  object
      * @param  {String}  username
      * @param  {String}  sourceType
      * @param  {Integer}  timestamp
      * @param  {String}  filetype
      * @param  {String}  shortcode
-     * @return {void}
+     * @return {String}  The generated filename
      */
-    function createSaveFileElement(downloadLink, object, username, sourceType, timestamp, filetype, shortcode) {
+    function getSaveFileName(downloadLink, username, sourceType, timestamp, filetype, shortcode) {
         timestamp = parseInt(timestamp.toString().padEnd(13, '0'));
 
         if (USER_SETTING.RENAME_PUBLISH_DATE) {
@@ -3244,6 +3254,26 @@
 
         const originally = username + '_' + original_name + '.' + filetype;
         const downloadName = USER_SETTING.AUTO_RENAME ? filename + '.' + filetype : originally;
+
+        return downloadName;
+    }
+
+
+    /**
+     * createSaveFileElement
+     * @description Download the specified media with link element.
+     *
+     * @param  {String}  downloadLink
+     * @param  {Object}  object
+     * @param  {String}  username
+     * @param  {String}  sourceType
+     * @param  {Integer}  timestamp
+     * @param  {String}  filetype
+     * @param  {String}  shortcode
+     * @return {void}
+     */
+    function createSaveFileElement(downloadLink, object, username, sourceType, timestamp, filetype, shortcode) {
+        const downloadName = getSaveFileName(downloadLink, username, sourceType, timestamp, filetype, shortcode);
         if (USER_SETTING.MODIFY_RESOURCE_EXIF && filetype === 'jpg' && shortcode && sourceType === 'photo' && (object.type === 'image/jpeg' || object.type === 'image/webp')) {
             changeExifData(object, shortcode)
                 .then(newBlob => triggerDownload(newBlob, downloadName))
@@ -3389,126 +3419,155 @@
      * @return {void}
      */
     async function triggerLinkElement(element, isPreview) {
-        let date = new Date().getTime();
-        let timestamp = Math.floor(date / 1000);
-        let username = ($(element).attr('data-username')) ? $(element).attr('data-username') : state.GL_username;
+        try {
+            let date = new Date().getTime();
+            let timestamp = Math.floor(date / 1000);
+            let username = ($(element).attr('data-username')) ? $(element).attr('data-username') : state.GL_username;
 
-        if (!username && $(element).attr('data-path')) {
-            logger('catching owner name from shortcode:', $(element).attr('data-href'));
-            username = await getPostOwner($(element).attr('data-path')).catch(err => {
-                logger('get username failed, replace with default string, error message:', err.message);
-            });
+            if (!username && $(element).attr('data-path')) {
+                logger('catching owner name from shortcode:', $(element).attr('data-href'));
+                username = await getPostOwner($(element).attr('data-path')).catch(err => {
+                    logger('get username failed, replace with default string, error message:', err.message);
+                });
 
-            if (username == null) {
-                username = "NONE";
-            }
-        }
-
-        if (USER_SETTING.RENAME_PUBLISH_DATE && $(element).attr('datetime')) {
-            timestamp = parseInt($(element).attr('datetime'));
-        }
-
-        let mediaId = $(element).attr('media-id');
-
-        if (USER_SETTING.CAPTURE_IMAGE_VIA_MEDIA_CACHE) {
-            const cached = getImageFromCache(mediaId);
-            if (cached && $(element).data('type') != "mp4") {
-                if (isPreview) {
-                    openNewTab(cached);
-                } else {
-                    saveFiles(cached, username, $(element).data('name'), timestamp, $(element).data('type') || 'jpg', $(element).data('path'));
+                if (username == null) {
+                    username = "NONE";
                 }
+            }
+
+            if (USER_SETTING.RENAME_PUBLISH_DATE && $(element).attr('datetime')) {
+                timestamp = parseInt($(element).attr('datetime'));
+            }
+
+            let mediaId = $(element).attr('media-id');
+
+            if (USER_SETTING.DOWNLOAD_STREAM_VIDEO && state.GL_videoDashCache[mediaId] && !isPreview) {
+                logger('[Video Dash Stream]', 'Processing video with DASH manifest, mediaId:', mediaId);
+                let dashManifest = state.GL_videoDashCache[mediaId];
+                let { video, audio } = getXmlMediaDashManifest(dashManifest);
+
+
+                let videoURL = replaceSameOriginHost(video.url);
+                let audioURL = replaceSameOriginHost(audio.url);
+
+                let downloadName = getSaveFileName(videoURL, username, $(element).attr('data-name'), timestamp, $(element).attr('data-type'), $(element).attr('data-path'));
+
+                GM_openInTab(`https://www.yuriko.cc/tools/ffmpeg?videoURL=${encodeURIComponent(videoURL)}&audioURL=${encodeURIComponent(audioURL)}&filename=${encodeURIComponent(downloadName)}`, { active: true });
                 return;
             }
-        }
 
-        if (USER_SETTING.FORCE_RESOURCE_VIA_MEDIA) {
-            updateLoadingBar(true);
-            let result = await getMediaInfo($(element).attr('media-id'));
-            updateLoadingBar(false);
-
-            if (result.status === 'ok') {
-                var resource_url = null;
-                if (result.items[0].video_versions) {
-                    resource_url = result.items[0].video_versions[0].url;
+            if (USER_SETTING.CAPTURE_IMAGE_VIA_MEDIA_CACHE) {
+                const cached = getImageFromCache(mediaId);
+                if (cached && $(element).data('type') != "mp4") {
+                    if (isPreview) {
+                        openNewTab(cached);
+                    } else {
+                        saveFiles(cached, username, $(element).data('name'), timestamp, $(element).data('type') || 'jpg', $(element).data('path'));
+                    }
+                    return;
                 }
-                else {
-                    result.items[0].image_versions2.candidates.sort(function (a, b) {
-                        let aSTP = new URL(a.url).searchParams.get('stp');
-                        let bSTP = new URL(b.url).searchParams.get('stp');
+            }
 
-                        if (aSTP && bSTP) {
-                            if (aSTP.length > bSTP.length) return 1;
-                            if (aSTP.length < bSTP.length) return -1;
-                        }
-                        else {
-                            if (a.width < b.width) return 1;
-                            if (a.width > b.width) return -1;
-                        }
+            if (USER_SETTING.FORCE_RESOURCE_VIA_MEDIA) {
+                updateLoadingBar(true);
+                let result = await getMediaInfo($(element).attr('media-id'));
+                updateLoadingBar(false);
 
-                        return 0;
-                    });
+                if (result.status === 'ok') {
+                    var resource_url = null;
+                    if (result.items[0].video_versions) {
+                        resource_url = result.items[0].video_versions[0].url;
+                    }
+                    else {
+                        result.items[0].image_versions2.candidates.sort(function (a, b) {
+                            let aSTP = new URL(a.url).searchParams.get('stp');
+                            let bSTP = new URL(b.url).searchParams.get('stp');
 
-                    resource_url = result.items[0].image_versions2.candidates[0].url;
+                            if (aSTP && bSTP) {
+                                if (aSTP.length > bSTP.length) return 1;
+                                if (aSTP.length < bSTP.length) return -1;
+                            }
+                            else {
+                                if (a.width < b.width) return 1;
+                                if (a.width > b.width) return -1;
+                            }
 
-                    const getWidthFromURL = function (obj) {
-                        if (obj.width != null) {
-                            return obj.width;
-                        }
-
-                        const url = new URL(obj.url);
-                        const stp = url.searchParams.get('stp');
-
-                        if (stp != null) {
-                            return parseInt(stp.match(/_p([0-9]+)x([0-9]+)_/i)?.at(1) || -1);
-                        }
-                        else {
                             return 0;
+                        });
+
+                        resource_url = result.items[0].image_versions2.candidates[0].url;
+
+                        const getWidthFromURL = function (obj) {
+                            if (obj.width != null) {
+                                return obj.width;
+                            }
+
+                            const url = new URL(obj.url);
+                            const stp = url.searchParams.get('stp');
+
+                            if (stp != null) {
+                                return parseInt(stp.match(/_p([0-9]+)x([0-9]+)_/i)?.at(1) || -1);
+                            }
+                            else {
+                                return 0;
+                            }
+                        }
+
+                        const resourceWidth = getWidthFromURL(result.items[0].image_versions2.candidates[0]);
+                        if (
+                            result.items[0].original_width !== resourceWidth &&
+                            resourceWidth !== -1
+                        ) {
+                            // alert();
                         }
                     }
 
-                    const resourceWidth = getWidthFromURL(result.items[0].image_versions2.candidates[0]);
-                    if (
-                        result.items[0].original_width !== resourceWidth &&
-                        resourceWidth !== -1
-                    ) {
-                        // alert();
+                    if (isPreview) {
+                        openNewTab(replaceSameOriginHost(resource_url));
+                    }
+                    else {
+                        saveFiles(resource_url, username, $(element).attr('data-name'), timestamp, $(element).attr('data-type'), $(element).attr('data-path'));
                     }
                 }
-
-                if (isPreview) {
-                    let urlObj = new URL(resource_url);
-                    urlObj.host = 'scontent.cdninstagram.com';
-
-                    openNewTab(urlObj.href);
-                }
                 else {
-                    saveFiles(resource_url, username, $(element).attr('data-name'), timestamp, $(element).attr('data-type'), $(element).attr('data-path'));
+                    if (USER_SETTING.FALLBACK_TO_BLOB_FETCH_IF_MEDIA_API_THROTTLED) {
+                        if (isPreview) {
+                            openNewTab(replaceSameOriginHost($(element).attr('data-href')));
+                        }
+                        else {
+                            saveFiles($(element).attr('data-href'), username, $(element).attr('data-name'), timestamp, $(element).attr('data-type'), $(element).attr('data-path'));
+                        }
+                    }
+                    else {
+                        alert('Fetch failed from Media API. API response message: ' + result.message);
+                    }
+                    logger(result);
                 }
             }
             else {
-                if (USER_SETTING.FALLBACK_TO_BLOB_FETCH_IF_MEDIA_API_THROTTLED) {
-                    if (isPreview) {
-                        let urlObj = new URL($(element).attr('data-href'));
-                        urlObj.host = 'scontent.cdninstagram.com';
-
-                        openNewTab(urlObj.href);
-                    }
-                    else {
-                        saveFiles($(element).attr('data-href'), username, $(element).attr('data-name'), timestamp, $(element).attr('data-type'), $(element).attr('data-path'));
-                    }
-                }
-                else {
-                    alert('Fetch failed from Media API. API response message: ' + result.message);
-                }
-                logger(result);
+                saveFiles($(element).attr('data-href'), username, $(element).attr('data-name'), timestamp, $(element).attr('data-type'), $(element).attr('data-path'));
             }
         }
-        else {
-            saveFiles($(element).attr('data-href'), username, $(element).attr('data-name'), timestamp, $(element).attr('data-type'), $(element).attr('data-path'));
+        catch (err) {
+            console.error('Occur error in triggerLinkElement:', err);
+            logger('Occur error in triggerLinkElement:', err);
         }
     }
 
+    /**
+     * replaceSameOriginHost
+     * @description Replace the host of the URL to bypass the same-origin policy for certain video resources that cannot be downloaded directly.
+     *
+     * @param  {string}  url
+     * @return {string}
+     */
+    function replaceSameOriginHost(url) {
+        // replace https://instagram.ftpe8-2.fna.fbcdn.net/ to https://scontent.cdninstagram.com/ becase of same origin policy (some video)
+        var urlObj = new URL(url);
+        urlObj.host = 'scontent.cdninstagram.com';
+
+        return urlObj.href;
+    }
 
     /**
      * registerMenuCommand
@@ -4135,6 +4194,45 @@
         $countSpan.text(` (${selectedLabel} / ${totalLabel})`);
     }
 
+    function getXmlMediaDashManifest(manifest) {
+        let parser = new DOMParser();
+        let xmlDoc = parser.parseFromString(manifest, 'application/xml');
+
+        let adaptationSets = xmlDoc.getElementsByTagName('AdaptationSet')
+
+        let video = null;
+        let audio = null;
+
+        Array.from(adaptationSets).forEach(element => {
+            if (element.getAttribute('contentType') === 'video') {
+                video = element;
+            } else if (element.getAttribute('contentType') === 'audio') {
+                audio = element;
+            }
+        });
+
+        let videoBestQualityElement = null;
+
+        Array.from(video.getElementsByTagName('Representation')).forEach(rep => {
+            let bandwidth = parseInt(rep.getAttribute('bandwidth'));
+            if (bandwidth > (videoBestQualityElement ? parseInt(videoBestQualityElement.getAttribute('bandwidth')) : 0)) {
+                videoBestQualityElement = rep;
+            }
+        });
+
+        return {
+            video: {
+                element: video,
+                url: decodeURIComponent(Array.from(videoBestQualityElement.getElementsByTagName('BaseURL')).at(0).textContent),
+                qualityLabel: videoBestQualityElement.getAttribute('FBQualityLabel')
+            },
+            audio: {
+                element: audio,
+                url: decodeURIComponent(Array.from(audio.getElementsByTagName('BaseURL')).at(0).textContent)
+            }
+        };
+    }
+
     let mediaCacheDirty = false;
     let mediaCacheSaveTimer = null;
 
@@ -4296,6 +4394,7 @@
                 "MODIFY_RESOURCE_EXIF": "Modify Resource EXIF Properties",
                 "SCROLL_BUTTON": "Enable Scroll Buttons for Reels Page",
                 "FORCE_RESOURCE_VIA_MEDIA": "Force Fetch Resource via Media API",
+                "DOWNLOAD_STREAM_VIDEO": "Download High-quality Streaming Videos",
                 "FALLBACK_TO_BLOB_FETCH_IF_MEDIA_API_THROTTLED": "Use Alternative Methods to Download When the Media API is Not Accessible",
                 "NEW_TAB_ALWAYS_FORCE_MEDIA_IN_POST": "Always Use Media API for 'Open in New Tab' in Posts",
                 "SKIP_VIEW_STORY_CONFIRM": "Skip the Confirmation Page for Viewing a Story/Highlight",
@@ -4314,6 +4413,7 @@
                 "MODIFY_VIDEO_VOLUME_INTRO": "Modify the video playback volume in Reels and posts (right-click to open the volume setting slider).",
                 "SCROLL_BUTTON_INTRO": "Enable scroll buttons for the lower right corner of the Reels page.",
                 "FORCE_RESOURCE_VIA_MEDIA_INTRO": "The Media API will try to get the highest quality photo or video possible, but it may take longer to load.",
+                "DOWNLOAD_STREAM_VIDEO_INTRO": "Download high-quality streaming videos (if available) through external websites and ffmpeg Wasm.",
                 "FALLBACK_TO_BLOB_FETCH_IF_MEDIA_API_THROTTLED_INTRO": "When the Media API reaches its rate limit or cannot be used for other reasons, the Forced Fetch API will be used to download resources (the resource quality may be slightly lower).",
                 "NEW_TAB_ALWAYS_FORCE_MEDIA_IN_POST_INTRO": "The [Open in New Tab] button in posts will always use the Media API to obtain high-resolution resources.",
                 "CHECK_FOR_UPDATE_INTRO": "Check for updates when the script is triggered (check every 300 seconds).\nUpdate notifications will be sent as desktop notifications through the browser.",
@@ -4575,16 +4675,11 @@
         });
 
         $('body').on('click', '.IG_POPUP_DIG_BODY .newTab', function () {
-            // replace https://instagram.ftpe8-2.fna.fbcdn.net/ to https://scontent.cdninstagram.com/ becase of same origin policy (some video)
-
             if (USER_SETTING.FORCE_RESOURCE_VIA_MEDIA && USER_SETTING.NEW_TAB_ALWAYS_FORCE_MEDIA_IN_POST) {
                 triggerLinkElement($(this).parent().children('a').first()[0], true);
             }
             else {
-                var urlObj = new URL($(this).parent().children('a').attr('data-href'));
-                urlObj.host = 'scontent.cdninstagram.com';
-
-                openNewTab(urlObj.href);
+                openNewTab(replaceSameOriginHost($(this).parent().children('a').attr('data-href')));
             }
         });
 
